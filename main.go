@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -14,18 +16,20 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/log"
 
+	"mystrom-exporter/pkg/discover"
 	"mystrom-exporter/pkg/mystrom"
 	"mystrom-exporter/pkg/version"
 )
 
-// -- MystromRequestStatusType represents the request to MyStrom device status
+// MystromReqStatus -- represents the request to MyStrom device status
 type MystromReqStatus uint32
 
+// values for the MystromReqStatus
 const (
 	OK MystromReqStatus = iota
-	ERROR_SOCKET
-	ERROR_TIMEOUT
-	ERROR_PARSING_VALUE
+	ErrorSocket
+	ErrorTimeout
+	ErrorParsingValue
 )
 
 const namespace = "mystrom_exporter"
@@ -39,6 +43,8 @@ var (
 		"Path under which the metrics of the devices are fetched")
 	showVersion = flag.Bool("version", false,
 		"Show version information.")
+	enableDiscovery = flag.Bool("discovery.enabled", false,
+		"Enable the mystrom autodiscovery")
 )
 var (
 	mystromDurationCounterVec *prometheus.CounterVec
@@ -71,8 +77,9 @@ var landingPage = []byte(`<html>
 </html>`)
 
 func main() {
-
 	flag.Parse()
+
+	// log.Base().SetLevel("debug")
 
 	// -- show version information
 	if *showVersion {
@@ -88,16 +95,58 @@ func main() {
 	// -- create a new registry for the exporter telemetry
 	telemetryRegistry := setupMetrics()
 
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+
+	// -- startup the discover engine
+	if *enableDiscovery {
+		discover.Initialize(*listenAddress)
+	}
+
+	// -- create the mux router config
 	router := mux.NewRouter()
 	router.Handle(*metricsPath, promhttp.HandlerFor(telemetryRegistry, promhttp.HandlerOpts{}))
 	router.HandleFunc(*devicePath, scrapeHandler)
+	if *enableDiscovery {
+		router.HandleFunc("/device_by_mac/{macaddr}", scrapeHandlerByMac)
+		router.HandleFunc("/discover", discoverHandler)
+	}
 	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write(landingPage)
 	})
-	log.Infoln("Listening on address " + *listenAddress)
-	log.Fatal(http.ListenAndServe(*listenAddress, router))
+
+	defer os.Exit(0)
+	defer func() {
+		log.Info("exiting.")
+	}()
+	if *enableDiscovery {
+		defer discover.ConnClose()
+	}
+
+	go func() {
+		log.Infoln("Listening on address " + *listenAddress)
+		if err := http.ListenAndServe(*listenAddress, router); err != nil {
+			log.Fatal(err)
+		}
+	}()
+
+	<-c
 }
 
+// scrapeHandlerByMac --
+func scrapeHandlerByMac(w http.ResponseWriter, r *http.Request) {
+	params := mux.Vars(r)
+
+	target := discover.TargetByMacaddr(params["macaddr"])
+
+	rq := r.URL.Query()
+	rq.Set("target", target)
+	r.URL.RawQuery = rq.Encode()
+
+	scrapeHandler(w, r)
+}
+
+// scrapeHandler --
 func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 	target := r.URL.Query().Get("target")
 	if target == "" {
@@ -113,11 +162,11 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 	duration := time.Since(start).Seconds()
 	if err != nil {
 		if strings.Contains(fmt.Sprintf("%v", err), "unable to connect with target") {
-			mystromRequestsCounterVec.WithLabelValues(target, ERROR_SOCKET.String()).Inc()
+			mystromRequestsCounterVec.WithLabelValues(target, ErrorSocket.String()).Inc()
 		} else if strings.Contains(fmt.Sprintf("%v", err), "i/o timeout") {
-			mystromRequestsCounterVec.WithLabelValues(target, ERROR_TIMEOUT.String()).Inc()
+			mystromRequestsCounterVec.WithLabelValues(target, ErrorTimeout.String()).Inc()
 		} else {
-			mystromRequestsCounterVec.WithLabelValues(target, ERROR_PARSING_VALUE.String()).Inc()
+			mystromRequestsCounterVec.WithLabelValues(target, ErrorParsingValue.String()).Inc()
 		}
 		http.Error(
 			w,
@@ -170,4 +219,17 @@ func setupMetrics() *prometheus.Registry {
 	registry.MustRegister(buildInfo)
 
 	return registry
+}
+
+// discoerHandler
+func discoverHandler(w http.ResponseWriter, r *http.Request) {
+	log.Infof("got discover request from '%v' for %v", r.Host, r.URL.String())
+	if data, e := discover.Discover(); e == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(data)
+		return
+	}
+	w.WriteHeader(http.StatusInternalServerError)
+
 }

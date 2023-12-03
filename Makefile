@@ -1,6 +1,10 @@
 ##
 #
 .DEFAULT_GOAL := help
+ifndef VERBOSE
+.SILENT:
+endif
+
 .PHONY: generate go-tools
 
 version    := $(shell git describe --tags --always)
@@ -39,11 +43,13 @@ build: go-tools generate ## builds the all platform binaries of the exporter
 run:
 	${BINDIR}/mystrom-exporter-$(shell $(GO) env GOOS)-$(shell $(GO) env GOARCH)
 
-
 generate: go-tools
 	$(GO) generate ./...
 
-go-tools: $(GOPATH)/bin/stringer $(GOPATH)/bin/gox
+fixfmt: go-tools
+	find . -type f -name  \*.go -exec goimports -w {} \;
+
+go-tools: $(GOPATH)/bin/stringer $(GOPATH)/bin/gox $(GOPATH)/bin/goimports
 
 # -- see more info on https://pkg.go.dev/golang.org/x/tools/cmd/stringer
 $(GOPATH)/bin/stringer:
@@ -51,6 +57,10 @@ $(GOPATH)/bin/stringer:
 
 $(GOPATH)/bin/gox:
 	$(GO) install github.com/mitchellh/gox@latest
+
+$(GOPATH)/bin/goimports:
+	$(GO) install golang.org/x/tools/cmd/goimports@latest
+
 # --
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST)  | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'

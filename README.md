@@ -40,10 +40,11 @@ $ ./mystrom-exporter --help
 | web.listen-address | Address to listen on | `:9452` |
 | web.metrics-path | Path under which to expose exporters own metrics | `/metrics` |
 | web.device-path | Path under which the metrics of the devices are fetched, requires `target` parameter | `/device` |
+| discovery.enabled | Enable the mystrom autodiscovery | false |
 
-## Prometheus configuration
+## Prometheus configuration (standard)
 A enhancement has been made to have only one exporter which can scrape multiple devices. This is configured in
-Prometheus as follows assuming we have 4 mystrom devices and the exporter is running locally on the smae machine as
+Prometheus as follows assuming we have 4 mystrom devices and the exporter is running locally on the same machine as
 the Prometheus.
 ```yaml
  - job_name: mystrom
@@ -62,6 +63,18 @@ the Prometheus.
      - target_label: __address__
        replacement: 127.0.0.1:9452
 ```
+
+## Prometheus configuration (with discovery)
+When the exporter is running in the same network as the mystrom devices, the scrape configis made via discovery. 
+
+```yaml
+ - job_name: mystrom
+   scrape_interval: 30s
+   honor_labels: true
+   http_sd_configs:
+   - url: http://127.0.0.1:9452/discover
+```
+
 
 ## Supported architectures
 Using the make file, you can easily build for the following architectures, those can also be considered the tested ones:
